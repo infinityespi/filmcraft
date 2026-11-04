@@ -294,7 +294,13 @@ fn seq_canvas(project: &Project, seq: &Sequence, t: Tick, opts: RenderOptions, s
         }
         match item_layer_ex(project, seq, item, t, opts, sources, LayerWant { tc: &tc, allow_region: true }) {
             Some(Layer::Full { image, opacity, blend: bl, opaque }) => {
-                if canvas.is_empty() && opaque && opacity == 1.0 && bl == Blend::Normal && (image.w, image.h) == (w, h) {
+                // Effects lose track of whether a layer is opaque, so a layer not known to be is checked.
+                let becomes_canvas = canvas.is_empty()
+                    && opacity == 1.0
+                    && bl == Blend::Normal
+                    && (image.w, image.h) == (w, h)
+                    && (opaque || image.px.as_chunks::<4>().0.iter().all(|p| p[3] == 1.0));
+                if becomes_canvas {
                     // mixing an opaque layer over transparent black gives the layer itself
                     canvas.set(image);
                 } else {

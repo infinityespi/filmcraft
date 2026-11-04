@@ -18,6 +18,7 @@ use std::io::Write;
 mod aac_out;
 mod audio_out;
 mod deflate;
+mod frame_pools;
 mod job;
 mod mxf_out;
 mod pace;

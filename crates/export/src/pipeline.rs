@@ -148,6 +148,8 @@ pub(crate) struct Pipeline {
     /// Free the pool's float images when the export ends: a standalone export, not one part of a
     /// batch (`ExportSettings::part_of_batch`).
     trim_pool: bool,
+    /// Where the frames of a batch render ([`crate::frame_pools`]).
+    pub(crate) frame_pools: crate::frame_pools::FramePools,
 }
 
 impl Drop for Pipeline {
@@ -227,6 +229,7 @@ impl Pipeline {
             start_tc: q.start_timecode,
             drop_frame: q.settings.drop_frame,
             trim_pool: !settings.part_of_batch,
+            frame_pools: Default::default(),
             project: project.clone(),
             seq,
             rate: r.rate,

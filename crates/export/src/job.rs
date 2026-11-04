@@ -19,7 +19,7 @@
 //!
 //! # Overlapping render and encode
 //!
-//! Rendering a batch is parallel (rayon); encoding, muxing and the audio are serial and own the
+//! Rendering a batch is parallel ([`crate::frame_pools`]); encoding, muxing and the audio are serial and own the
 //! encoder, the container writer and the audio state. Run one after the other the wall time was
 //! `render + encode + audio + mux`. A step now renders batch *k+1* on the rayon pool
 //! ([`rayon::in_place_scope`] + `spawn`) while the *calling* thread encodes, muxes and mixes the
@@ -67,7 +67,6 @@ use filmcraft_isobmff::{Brand, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, W
 use filmcraft_project::{ItemId, Project};
 use filmcraft_render::SourceProvider;
 use filmcraft_time::FrameRate;
-use rayon::prelude::*;
 
 use crate::audio_out::AudioOut;
 use crate::mxf_out::{MxfMux, MxfSetup};
@@ -117,20 +116,17 @@ struct Ahead {
 /// from `f0` like [`EncoderFrame::index`].
 fn render_batch(pipe: &Pipeline, f: i64, end: i64, sources: &dyn SourceProvider, prepare: Option<&PrepareAhead>, f0: i64) -> Option<Vec<Frame>> {
     let pending = AtomicBool::new(false);
-    let frames: Vec<Frame> = (f..end)
-        .into_par_iter()
-        .map(|fi| {
-            let frame = pipe.frame(fi, sources);
-            if filmcraft_media::pending::take() {
-                pending.store(true, Ordering::Relaxed);
-            }
-            if let Some(prepare) = prepare {
-                let index = u64::try_from(fi - f0).unwrap_or(u64::MAX);
-                prepare(&EncoderFrame { width: pipe.w, height: pipe.h, rgba: &frame.0, hdr: pipe.hdr_out.then_some(frame.1.as_slice()), index });
-            }
-            frame
-        })
-        .collect();
+    let frames: Vec<Frame> = pipe.frame_pools.map(f, end, |fi| {
+        let frame = pipe.frame(fi, sources);
+        if filmcraft_media::pending::take() {
+            pending.store(true, Ordering::Relaxed);
+        }
+        if let Some(prepare) = prepare {
+            let index = u64::try_from(fi - f0).unwrap_or(u64::MAX);
+            prepare(&EncoderFrame { width: pipe.w, height: pipe.h, rgba: &frame.0, hdr: pipe.hdr_out.then_some(frame.1.as_slice()), index });
+        }
+        frame
+    });
     (!pending.load(Ordering::Relaxed)).then_some(frames)
 }
 

@@ -344,14 +344,14 @@ fn threads_used(outer: usize, max_threads: u32, name: &str) -> (usize, usize) {
 
 #[test]
 fn max_threads_caps_the_threads_an_export_runs_on() {
-    // uncapped, it renders on the pool it is called in
-    let (most, threads) = threads_used(8, 0, "cap-0.mov");
-    assert_eq!(most, 8);
+    // uncapped, it uses the threads of the pool it is called in, and no more
+    let (_, threads) = threads_used(8, 0, "cap-0.mov");
     assert!(threads > 3, "{threads} threads asked for frames: the uncapped export should have used several");
+    assert!(threads <= 8, "{threads} threads asked for frames on a pool of 8");
     // capped, on a pool of that size
     for cap in [1u32, 3] {
         let (most, threads) = threads_used(8, cap, &format!("cap-{cap}.mov"));
-        assert_eq!(most, cap as usize, "cap {cap}");
+        assert!(most <= cap as usize, "cap {cap}: a frame ran on a pool of {most}");
         assert!(threads <= cap as usize, "cap {cap}: {threads} threads asked for frames");
     }
 }
@@ -359,8 +359,8 @@ fn max_threads_caps_the_threads_an_export_runs_on() {
 #[test]
 fn max_threads_never_adds_threads() {
     // a cap at or above the pool the export is called in changes nothing
-    assert_eq!(threads_used(4, 4, "cap-same.mov").0, 4);
-    assert_eq!(threads_used(4, 100, "cap-large.mov").0, 4);
+    assert!(threads_used(4, 4, "cap-same.mov").1 <= 4);
+    assert!(threads_used(4, 100, "cap-large.mov").1 <= 4);
 }
 
 #[test]
@@ -381,4 +381,57 @@ fn max_threads_is_a_setting_of_the_json_interface() {
     assert_eq!(s.max_threads, 2);
     assert_eq!(ExportSettings::default().max_threads, 0, "all cores unless asked");
     assert_eq!(serde_json::to_value(&s).unwrap()["maxThreads"], serde_json::json!(2));
+}
+
+/// A source that works in parallel, as decoding and effects do, and records how many of its calls
+/// were ever under way on one thread at a time.
+struct Nesting<'a> {
+    inner: &'a SourceMap,
+    deepest: AtomicUsize,
+}
+
+thread_local! {
+    static SOURCE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl SourceProvider for Nesting<'_> {
+    fn source(&self, item: ItemId) -> Option<SharedSource> {
+        let depth = SOURCE_DEPTH.with(|d| {
+            d.set(d.get() + 1);
+            d.get()
+        });
+        self.deepest.fetch_max(depth, Ordering::SeqCst);
+        (0..64).into_par_iter().for_each(|_| std::thread::sleep(std::time::Duration::from_micros(200)));
+        SOURCE_DEPTH.with(|d| d.set(d.get() - 1));
+        self.inner.source(item)
+    }
+}
+
+/// A worker waiting for a frame's inner parallel work runs other queued work meanwhile. If that can be
+/// another frame, frames pile up on one stack until it overflows.
+#[test]
+fn frames_do_not_nest_on_one_stack() {
+    let (p, seq, m) = project();
+    let nesting = Nesting { inner: &m, deepest: AtomicUsize::new(0) };
+    let settings = ExportSettings { format: Format::Mjpeg, path: tmp("nesting.mov"), include_audio: false, ..Default::default() };
+    pool(8).install(|| export(&p, seq, &settings, &nesting, &Progress::default())).unwrap();
+    assert_eq!(nesting.deepest.load(Ordering::SeqCst), 1, "a frame started on a thread that was still in the middle of another");
+}
+
+/// A layer whose effects leave it opaque becomes the canvas, like a layer known to be opaque, which
+/// must not change a pixel.
+#[test]
+fn an_opaque_layer_with_an_effect_exports_the_same_file() {
+    let settings = |name: &str| ExportSettings { format: Format::Mjpeg, path: tmp(name), include_audio: false, ..Default::default() };
+    let plain = settings("plain.mov");
+    let (p, seq, m) = project();
+    export(&p, seq, &plain, &m, &Progress::default()).unwrap();
+    let with_effect = settings("effect.mov");
+    let (mut p, seq, m) = project();
+    let project = Arc::get_mut(&mut p).unwrap();
+    let inst = filmcraft_project::find_effect("gaussian_blur").unwrap().instance();
+    let track = project.sequence_mut(seq).unwrap().video_tracks.first_mut().unwrap();
+    track.items.first_mut().unwrap().effects.push(inst);
+    export(&p, seq, &with_effect, &m, &Progress::default()).unwrap();
+    assert!(std::fs::read(&plain.path).unwrap() == std::fs::read(&with_effect.path).unwrap());
 }
