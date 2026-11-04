@@ -1,2 +1,7 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+[env]
+# Tests share one Rayon pool, and a worker waiting for inner work runs other tests' tasks on the same
+# stack: at full parallelism a debug build overflows the default 2 MiB. Only reserves address space.
+RUST_MIN_STACK = "8388608"
