@@ -3,6 +3,19 @@ use filmcraft_engine::Session;
 use filmcraft_time::Tick;
 use filmcraft_ui_egui::{FilmcraftApp, menus};
 use serde_json::json;
+use std::time::{Duration, Instant};
+
+/// Step until playback stops. Counting steps is not enough: the app's clock is the later of the
+/// harness clock and the host clock, and a step can wait many seconds on the rayon pool that all
+/// tests in this binary share (the loudness meter mixes on it). From then on playback follows real
+/// time, which quick steps barely advance, so this waits on real time.
+fn step_until_stopped(harness: &mut Harness<'static, FilmcraftApp>) {
+    let started = Instant::now();
+    while harness.state().playback.playing && started.elapsed() < Duration::from_secs(120) {
+        harness.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[test]
 fn program_range_playback_rests_on_inclusive_out_frame() {
@@ -23,12 +36,7 @@ fn program_range_playback_rests_on_inclusive_out_frame() {
         menus::invoke(harness.state_mut(), &ctx, command, json!({"monitor": "program"})).unwrap();
         assert_eq!(harness.state().playback.stop_at, Some(out + fd));
         assert_eq!(harness.state().playback.rest_at, Some(out));
-        for _ in 0..40 {
-            harness.step();
-            if !harness.state().playback.playing {
-                break;
-            }
-        }
+        step_until_stopped(&mut harness);
         assert!(!harness.state().playback.playing, "{command} did not stop");
         assert_eq!(harness.state().session.playhead(), out, "{command} must rest on Out");
         assert_eq!(harness.state().playback.rest_at, None);
@@ -38,12 +46,7 @@ fn program_range_playback_rests_on_inclusive_out_frame() {
     let duration = harness.state().session.active_sequence().unwrap().duration();
     harness.state_mut().session.set_playhead(duration - rate.tick_of(6));
     menus::invoke(harness.state_mut(), &ctx, "playback.forward", json!({"monitor": "program"})).unwrap();
-    for _ in 0..40 {
-        harness.step();
-        if !harness.state().playback.playing {
-            break;
-        }
-    }
+    step_until_stopped(&mut harness);
     assert!(!harness.state().playback.playing);
     assert_eq!(harness.state().session.playhead(), duration - fd);
 
