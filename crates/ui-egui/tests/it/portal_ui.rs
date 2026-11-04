@@ -19,7 +19,14 @@ use serde_json::{Value, json};
 
 /// Answers every request with the portal JSON built from the shared comments.
 fn fake_server(comments: Arc<Mutex<Vec<Value>>>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    serve(TcpListener::bind("127.0.0.1:0").unwrap(), comments)
+}
+
+fn serve_on(port: u16, comments: Arc<Mutex<Vec<Value>>>) {
+    serve(TcpListener::bind(("127.0.0.1", port)).unwrap(), comments);
+}
+
+fn serve(listener: TcpListener, comments: Arc<Mutex<Vec<Value>>>) -> String {
     let address = format!("http://{}", listener.local_addr().unwrap());
     let url = address.clone();
     std::thread::spawn(move || {
@@ -34,7 +41,7 @@ fn fake_server(comments: Arc<Mutex<Vec<Value>>>) -> String {
                 }
             }
             let body = json!({
-                "title": "Cut", "url": format!("{url}/portal/tok"),
+                "title": "Cut", "url": format!("{url}/portal/tok"), "code": "7-crossover-clockwork",
                 "versions": [{"id": "v1", "number": 1, "fps_num": 30, "fps_den": 1}],
                 "comments": *comments.lock().unwrap(),
             })
@@ -316,4 +323,206 @@ fn the_upload_dialog_exports_and_uploads_in_the_background() {
     assert!(*received.lock().unwrap() > 1000, "no video reached the server");
     assert_eq!(d.exec("portal.status", json!({}))["versions"], 1);
     assert_eq!(d.exec("portal.status", json!({}))["uploading"], false);
+}
+
+// ---- the Timeline chip and its details box ----
+
+impl Driver {
+    fn chip(&mut self) -> Option<String> {
+        self.frames(2);
+        let v = self.ok("ui.elements", json!({"prefix": "portal.chip"}));
+        v.as_array().unwrap().iter().find(|e| e["id"] == "portal.chip").map(|e| e["label"].as_str().unwrap_or("").to_string())
+    }
+    fn status_text(&mut self) -> String {
+        self.frames(2);
+        let v = self.ok("ui.elements", json!({"prefix": "portal.details.status"}));
+        v.as_array().unwrap().first().map_or(String::new(), |e| e["label"].as_str().unwrap_or("").to_string())
+    }
+    /// Wait for the chip to read `want`, with nothing else touching the app.
+    fn wait_chip(&mut self, want: &str) {
+        let mut last = None;
+        for _ in 0..500 {
+            last = self.chip();
+            if last.as_deref().is_some_and(|l| l.contains(want)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the chip never said {want:?}; it said {last:?}");
+    }
+}
+
+#[test]
+fn nothing_shows_for_someone_who_never_connected() {
+    let mut d = Driver::new(Session::default());
+    d.exec("file.newSequence", json!({"name": "Cut", "fps": 30}));
+    assert_eq!(d.chip(), None);
+}
+
+#[test]
+fn connected_with_no_portal_offers_to_share() {
+    let (server, _) = upload_server();
+    let mut d = Driver::new(Session::default());
+    d.exec("file.newSequence", json!({"name": "My Cut", "fps": 30}));
+    d.exec("portal.connect", json!({"server": server, "apiKey": "k", "wait": true}));
+    assert_eq!(d.chip().as_deref(), Some("Share for review"));
+    d.ok("ui.click", json!({"id": "portal.chip"}));
+    d.frames(3);
+    assert!(d.elements("portal.").iter().any(|e| e == "portal.upload.title"), "the chip should open the upload dialog");
+    d.shot("chip-share");
+}
+
+#[test]
+fn a_live_portal_shows_version_notes_and_details() {
+    let comments = Arc::new(Mutex::new(vec![comment("a", 60, "Maya", "Warm this shot")]));
+    let server = fake_server(comments.clone());
+    let mut d = Driver::new(linked(&server));
+    d.wait_chip("1 new");
+    assert!(d.chip().unwrap().contains("v1"));
+    d.shot("chip-live");
+    d.ok("ui.click", json!({"id": "portal.chip"}));
+    d.frames(4);
+    let found = d.elements("portal.details");
+    for id in ["portal.details.copy", "portal.details.open", "portal.details.sync", "portal.details.upload", "portal.details.stop"] {
+        assert!(found.iter().any(|e| e == id), "{id} missing from {found:?}");
+    }
+    assert!(d.status_text().contains("Connected"), "{}", d.status_text());
+    assert!(d.chip().unwrap().contains("1 open"), "opening the box clears the new count: {:?}", d.chip());
+    d.shot("chip-details");
+    // Escape closes it
+    d.harness.key_press(egui::Key::Escape);
+    d.frames(3);
+    assert!(d.elements("portal.details").is_empty());
+}
+
+#[test]
+fn stopping_asks_first_and_can_be_kept() {
+    let server = fake_server(Arc::new(Mutex::new(Vec::new())));
+    let mut d = Driver::new(linked(&server));
+    d.wait_chip("v1");
+    d.ok("ui.click", json!({"id": "portal.chip"}));
+    d.frames(3);
+    d.ok("ui.click", json!({"id": "portal.details.stop"}));
+    d.frames(3);
+    d.ok("ui.click", json!({"id": "portal.details.stop.cancel"}));
+    d.frames(3);
+    assert!(d.chip().unwrap().contains("v1"), "keeping must leave the link alone");
+    d.ok("ui.click", json!({"id": "portal.details.stop"}));
+    d.frames(3);
+    d.ok("ui.click", json!({"id": "portal.details.stop.confirm"}));
+    d.frames(3);
+    assert_eq!(d.chip().as_deref(), Some("Share for review"));
+    assert!(d.elements("portal.details").is_empty());
+}
+
+#[test]
+fn a_dead_server_reads_offline_and_recovers_by_itself() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let up = fake_server(Arc::new(Mutex::new(Vec::new())));
+    let mut session = linked(&up);
+    let seq = session.state.active_sequence.unwrap();
+    let mut project = (*session.project).clone();
+    project.portal_links.get_mut(&seq).unwrap().server = address.clone();
+    session.project = Arc::new(project);
+    session.execute("portal.connect", json!({"server": address, "apiKey": "k"})).unwrap();
+    let mut d = Driver::new(session);
+    d.wait_chip("Offline");
+    d.shot("chip-offline");
+    d.ok("ui.click", json!({"id": "portal.chip"}));
+    d.frames(3);
+    assert!(d.status_text().contains("keep trying"), "{}", d.status_text());
+    d.harness.key_press(egui::Key::Escape);
+    d.frames(3);
+
+    // the server comes back on the same address
+    let comments = Arc::new(Mutex::new(vec![comment("a", 30, "Maya", "Back")]));
+    serve_on(port, comments);
+    filmcraft_engine::portal::make_sync_due(&mut d.harness.state_mut().session);
+    d.wait_chip("1 new");
+}
+
+#[test]
+fn a_refused_key_asks_to_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut buffer = [0u8; 2048];
+            let _ = stream.read(&mut buffer);
+            let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+        }
+    });
+    let up = fake_server(Arc::new(Mutex::new(Vec::new())));
+    let mut session = linked(&up);
+    let seq = session.state.active_sequence.unwrap();
+    let mut project = (*session.project).clone();
+    project.portal_links.get_mut(&seq).unwrap().server = address.clone();
+    session.project = Arc::new(project);
+    session.execute("portal.connect", json!({"server": address, "apiKey": "k"})).unwrap();
+    let mut d = Driver::new(session);
+    d.wait_chip("Reconnect");
+    d.ok("ui.click", json!({"id": "portal.chip"}));
+    d.frames(3);
+    d.ok("ui.click", json!({"id": "portal.details.connect"}));
+    d.frames(3);
+    assert!(d.elements("portal.").iter().any(|e| e == "portal.connect.key"));
+}
+
+#[test]
+fn a_project_from_another_computer_asks_to_connect_and_names_the_server() {
+    let server = fake_server(Arc::new(Mutex::new(Vec::new())));
+    let mut session = linked(&server);
+    session.execute("portal.disconnect", json!({})).unwrap();
+    let mut d = Driver::new(session);
+    d.wait_chip("Connect to sync");
+    d.ok("ui.click", json!({"id": "portal.chip"}));
+    d.frames(3);
+    d.ok("ui.click", json!({"id": "portal.details.connect"}));
+    d.frames(3);
+    match d.harness.state().ui.portal_dialog.clone() {
+        Some(filmcraft_ui_egui::panels::portal::PortalDialog::Connect { server: shown, .. }) => assert_eq!(shown, server),
+        other => panic!("expected the connect dialog, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_chip_follows_the_active_sequence() {
+    let server = fake_server(Arc::new(Mutex::new(Vec::new())));
+    let mut d = Driver::new(linked(&server));
+    d.wait_chip("v1");
+    let linked_seq = d.harness.state().session.state.active_sequence.unwrap();
+    d.exec("file.newSequence", json!({"name": "Other", "fps": 30}));
+    assert_eq!(d.chip().as_deref(), Some("Share for review"));
+    d.exec("sequence.open", json!({"item": linked_seq.0}));
+    d.wait_chip("v1");
+}
+
+#[test]
+fn the_details_box_shows_the_review_code_and_copies_it() {
+    let server = fake_server(Arc::new(Mutex::new(Vec::new())));
+    let mut d = Driver::new(linked(&server));
+    d.wait_chip("v1");
+    d.ok("ui.click", json!({"id": "portal.chip"}));
+    d.frames(3);
+    assert!(d.elements("portal.details").iter().any(|e| e == "portal.details.copyCode"));
+    d.shot("chip-code");
+    let r = d.ok("ui.menu.invoke", json!({"command": "portal.copyCode", "params": {}}));
+    assert_eq!(r["code"], "7-crossover-clockwork");
+    assert!(d.harness.state().ui.status.contains("copied"), "{}", d.harness.state().ui.status);
+}
+
+#[test]
+fn a_server_without_codes_shows_no_code_controls() {
+    let (server, _) = upload_server();
+    let mut d = Driver::new(linked(&server));
+    d.wait_chip("v1");
+    d.ok("ui.click", json!({"id": "portal.chip"}));
+    d.frames(3);
+    assert!(!d.elements("portal.details").iter().any(|e| e == "portal.details.copyCode"));
+    let r = d.call("ui.menu.invoke", json!({"command": "portal.copyCode", "params": {}}));
+    assert_eq!(r["ok"], false, "{r}");
 }

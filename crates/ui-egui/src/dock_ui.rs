@@ -262,7 +262,8 @@ impl FilmcraftApp {
         let layout = self.ui.dock.clone();
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("filmcraft-dock-area"));
         child.set_clip_rect(body.intersect(ui.clip_rect()));
-        let seq_width = dock::sequence_tabs_width(ui, &seqs);
+        let portal_chip = panels::portal::chip_for(self, ui);
+        let seq_width = dock::sequence_tabs_width(ui, &seqs) + portal_chip.as_ref().map_or(0.0, |c| c.width);
         // Known before anything draws, so header elements of a native window (the ≡ menu, the
         // Timeline's sequence tabs), drawn before its bodies, carry that window too.
         self.auto.windows =
@@ -271,6 +272,7 @@ impl FilmcraftApp {
             app: self,
             seqs,
             seq_width,
+            portal_chip,
             tokens: t,
             seq_actions: Vec::new(),
             menu: None,
@@ -477,6 +479,8 @@ struct FilmContent<'a> {
     seqs: SeqTabs,
     /// The width the sequence tabs take in the Timeline's tab strip.
     seq_width: f32,
+    /// The active sequence's Portals status, drawn between its tab and the ≡ menu.
+    portal_chip: Option<panels::portal::Chip>,
     tokens: Tokens,
     seq_actions: Vec<SeqAction>,
     /// The ≡ button clicked: its panel and where its menu opens.
@@ -587,7 +591,12 @@ impl DockContent<PanelKind> for FilmContent<'_> {
         let header = ui.max_rect();
         let menu = Rect::from_min_max(egui::pos2((header.max.x - MENU_W).max(header.min.x), header.min.y), header.max);
         if *active == PanelKind::Timeline && !self.seqs.open.is_empty() {
-            let strip = Rect::from_min_max(header.min, egui::pos2(menu.min.x, header.max.y));
+            let chip_left = (menu.min.x - self.portal_chip.as_ref().map_or(0.0, |c| c.width)).max(header.min.x);
+            if let Some(chip) = &self.portal_chip {
+                let slot = Rect::from_min_max(egui::pos2(chip_left, header.min.y), egui::pos2(menu.min.x, header.max.y));
+                panels::portal::draw_chip(self.app, ui, slot, chip);
+            }
+            let strip = Rect::from_min_max(header.min, egui::pos2(chip_left, header.max.y));
             let actions = dock::sequence_tabs(ui, strip, &self.seqs, &t, &mut self.app.auto);
             if actions.iter().any(|a| matches!(a, SeqAction::Menu(..))) {
                 self.seq_menu_viewport = ui.ctx().viewport_id();

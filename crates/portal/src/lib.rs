@@ -52,16 +52,24 @@ pub struct Connection {
 pub struct PortalData {
     pub title: String,
     pub url: String,
+    /// When someone other than the editor first opened the link.
+    #[serde(default)]
+    pub viewed_at: Option<f64>,
+    /// What reviewers must enter to open the link, for the editor to pass on.
+    #[serde(default)]
+    pub code: Option<String>,
     pub versions: Vec<Version>,
     pub comments: Vec<Comment>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Version {
     pub id: String,
     pub number: i64,
     pub fps_num: i64,
     pub fps_den: i64,
+    #[serde(default)]
+    pub created_at: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -134,7 +142,7 @@ fn is_private_host(authority: &str) -> bool {
 
 #[cfg(not(feature = "http"))]
 mod offline {
-    use super::*;
+    use super::{Connection, Created, Error, NewVersion, PortalData, Result, UploadSession};
     pub fn create_portal(_: &Connection, _: &str, _: Option<f64>) -> Result<Created> {
         Err(Error::Unavailable)
     }
@@ -165,7 +173,7 @@ mod tests {
 
     #[test]
     fn plain_http_only_stays_on_private_networks() {
-        for ok in ["http://127.0.0.1:8799", "http://localhost:8765", "http://192.168.1.183:8765", "http://10.0.0.2", "http://172.16.0.9"] {
+        for ok in ["http://127.0.0.1:8799", "http://localhost:8765", "http://192.168.1.50:8765", "http://10.0.0.2", "http://172.16.0.9"] {
             assert!(normalize_server(ok).is_ok(), "{ok}");
         }
         for bad in ["http://files.example.com", "http://8.8.8.8", "http://172.32.0.1", "http://192.168.1.1.evil.com"] {

@@ -12,7 +12,7 @@
 //! The API key lives in `portal.json` beside the preferences, readable only by this user, and
 //! never in the project.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -47,10 +47,138 @@ pub struct PortalState {
     uploads: Vec<PendingUpload>,
     sync: Option<PendingSync>,
     connect_check: Option<Shared<()>>,
-    last_sync: Option<Instant>,
+    /// When each portal was last asked for comments.
+    last_attempt: HashMap<String, Instant>,
+    /// What each portal's last answer said, for the Timeline's status chip.
+    synced: HashMap<String, Synced>,
+    /// Why each portal's last sync failed.
+    issues: HashMap<String, Issue>,
+    /// Notes that arrived since the editor last looked, by sequence.
+    new_notes: HashMap<ItemId, usize>,
     last_error: Option<String>,
     /// Portals the server says are gone: don't keep asking this session.
     gone: HashSet<String>,
+}
+
+#[derive(Clone, Debug)]
+struct Synced {
+    at: Instant,
+    title: String,
+    viewed_at: Option<f64>,
+    uploaded_at: Option<f64>,
+    latest_version: i64,
+    code: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Issue {
+    /// The server can't be reached. It fixes itself: syncing keeps trying.
+    Offline,
+    /// The key was refused. The editor has to act.
+    Refused,
+    /// The portal was deleted or has expired.
+    Gone,
+}
+
+/// What the Timeline's status chip shows for the active sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortalStatus {
+    /// Connected to a server, and this sequence isn't on a portal.
+    Share,
+    Exporting,
+    Uploading,
+    Live,
+    Offline,
+    Reconnect,
+    /// The sequence has a portal, but this computer isn't connected to its server.
+    NeedsConnect,
+    Unavailable,
+}
+
+/// A snapshot of one sequence's link to Portals, for display. Never holds the API key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PortalView {
+    pub status: PortalStatus,
+    /// The server this computer is connected to.
+    pub connected_server: Option<String>,
+    /// The server the sequence's portal is on.
+    pub portal_server: Option<String>,
+    pub url: Option<String>,
+    /// What reviewers must enter to open the link.
+    pub code: Option<String>,
+    pub title: Option<String>,
+    pub version: Option<i64>,
+    pub open_notes: usize,
+    pub done_notes: usize,
+    pub new_notes: usize,
+    pub synced_seconds_ago: Option<u64>,
+    pub uploaded_seconds_ago: Option<u64>,
+    pub opened_seconds_ago: Option<u64>,
+    /// Export or upload progress, 0 to 1.
+    pub progress: f32,
+}
+
+fn seconds_since(epoch: Option<f64>) -> Option<u64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs_f64();
+    epoch.filter(|t| t.is_finite()).map(|t| (now - t).max(0.0) as u64)
+}
+
+/// The active sequence's link to Portals, or None when there's nothing to say: someone who has
+/// never connected a server sees nothing in the Timeline.
+pub fn view(s: &mut Session) -> Option<PortalView> {
+    if !filmcraft_portal::AVAILABLE {
+        return None;
+    }
+    let seq = s.state.active_sequence?;
+    let connected_server = connection(s).map(|c| c.server);
+    let link = s.project.portal_links.get(&seq);
+    let upload = s.portal.uploads.iter().find(|u| u.seq == seq);
+    if link.is_none() && upload.is_none() && connected_server.is_none() {
+        return None;
+    }
+    let fraction = |id: u64| s.jobs.iter().find(|j| j.id == id).map_or(0.0, |j| j.progress.fraction().clamp(0.0, 1.0));
+    let synced = link.and_then(|l| s.portal.synced.get(&l.token));
+    let issue = link.and_then(|l| s.portal.issues.get(&l.token)).copied();
+    let (status, progress) = match (upload, link) {
+        (Some(u), _) => match u.upload_job {
+            Some(job) => (PortalStatus::Uploading, fraction(job)),
+            None => (PortalStatus::Exporting, fraction(u.export_job)),
+        },
+        (None, None) => (PortalStatus::Share, 0.0),
+        (None, Some(l)) if connected_server.as_deref() != Some(l.server.as_str()) => (PortalStatus::NeedsConnect, 0.0),
+        (None, Some(l)) if s.portal.gone.contains(&l.token) => (PortalStatus::Unavailable, 0.0),
+        (None, Some(_)) => match issue {
+            Some(Issue::Offline) => (PortalStatus::Offline, 0.0),
+            Some(Issue::Refused) => (PortalStatus::Reconnect, 0.0),
+            Some(Issue::Gone) => (PortalStatus::Unavailable, 0.0),
+            None => (PortalStatus::Live, 0.0),
+        },
+    };
+    let open_notes = link.map_or(0, |l| l.notes.values().filter(|n| !n.resolved).count());
+    let done_notes = link.map_or(0, |l| l.notes.values().filter(|n| n.resolved).count());
+    Some(PortalView {
+        status,
+        connected_server,
+        portal_server: link.map(|l| l.server.clone()),
+        url: link.map(|l| l.url.clone()),
+        code: synced.and_then(|d| d.code.clone()),
+        title: synced.map(|d| d.title.clone()),
+        version: synced.map(|d| d.latest_version).or_else(|| link.and_then(|l| l.versions.iter().map(|v| v.number).max())),
+        open_notes,
+        done_notes,
+        new_notes: s.portal.new_notes.get(&seq).copied().unwrap_or(0),
+        synced_seconds_ago: synced.map(|d| d.at.elapsed().as_secs()),
+        uploaded_seconds_ago: seconds_since(synced.and_then(|d| d.uploaded_at)),
+        opened_seconds_ago: seconds_since(synced.and_then(|d| d.viewed_at)),
+        progress,
+    })
+}
+
+/// The editor has seen the active sequence's new notes.
+pub fn mark_seen(s: &mut Session) {
+    if let Some(seq) = s.state.active_sequence {
+        s.portal.new_notes.remove(&seq);
+    }
 }
 
 impl PortalState {
@@ -164,6 +292,12 @@ pub fn active_url(s: &Session) -> Option<String> {
     active_link(s).map(|l| l.url.clone())
 }
 
+/// The review code of the active sequence's portal, once a sync has fetched it.
+pub fn active_code(s: &Session) -> Option<String> {
+    let link = active_link(s)?;
+    s.portal.synced.get(&link.token)?.code.clone()
+}
+
 /// The saved server address, to prefill the Connect dialog. Never the key.
 pub fn saved_server(s: &mut Session) -> Option<String> {
     connection(s).map(|c| c.server)
@@ -182,8 +316,9 @@ fn run_connect(s: &mut Session, p: &Value) -> Result<Value> {
     s.portal.connection = Some(conn.clone());
     s.portal.connection_loaded = true;
     s.portal.gone.clear();
+    s.portal.issues.clear();
+    s.portal.last_attempt.clear();
     s.portal.last_error = None;
-    s.portal.last_sync = None;
     let slot: Shared<()> = Arc::default();
     let check = move || check_connection(&conn);
     if bool_p(p, "wait").unwrap_or(false) {
@@ -434,7 +569,9 @@ fn finish_upload(s: &mut Session, u: &PendingUpload, published: Published) {
         link.versions.push(version);
     });
     s.portal.last_error = None;
-    s.portal.last_sync = None;
+    if let Some(link) = s.project.portal_links.get(&seq) {
+        s.portal.last_attempt.remove(&link.token);
+    }
     s.toast(format!("Uploaded to Portal: {url}"));
 }
 
@@ -554,6 +691,7 @@ fn apply_data(s: &mut Session, seq: ItemId, data: &PortalData) -> SyncSummary {
         });
     }
     if summary.added > 0 {
+        *s.portal.new_notes.entry(seq).or_default() += summary.added;
         s.toast(match summary.added {
             1 => "Portal: 1 new note".to_string(),
             n => format!("Portal: {n} new notes"),
@@ -562,24 +700,46 @@ fn apply_data(s: &mut Session, seq: ItemId, data: &PortalData) -> SyncSummary {
     summary
 }
 
+/// Record a portal's answer, for the status chip.
+fn record_success(s: &mut Session, token: &str, data: &PortalData) {
+    let latest = data.versions.iter().max_by_key(|v| v.number);
+    s.portal.synced.insert(
+        token.to_string(),
+        Synced {
+            at: Instant::now(),
+            title: data.title.clone(),
+            viewed_at: data.viewed_at,
+            uploaded_at: latest.and_then(|v| v.created_at),
+            latest_version: latest.map_or(0, |v| v.number),
+            code: data.code.clone(),
+        },
+    );
+    s.portal.issues.remove(token);
+    s.portal.last_error = None;
+}
+
 fn start_sync(s: &mut Session, conn: Connection, seq: ItemId, token: String) {
     let result: Shared<PortalData> = Arc::default();
     let t = token.clone();
     guarded(result.clone(), move || filmcraft_portal::fetch_portal(&conn, &t).map_err(|e| e.to_string()));
+    s.portal.last_attempt.insert(token.clone(), Instant::now());
     s.portal.sync = Some(PendingSync { seq, token, result });
-    s.portal.last_sync = Some(Instant::now());
 }
 
 fn run_sync(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "portal.sync";
     let conn = need_connection(s, CMD)?;
     let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
-    let token = s.project.portal_links.get(&seq).map(|l| l.token.clone()).ok_or_else(|| bad(CMD, "this sequence isn't on a portal yet"))?;
+    let (token, server) =
+        s.project.portal_links.get(&seq).map(|l| (l.token.clone(), l.server.clone())).ok_or_else(|| bad(CMD, "this sequence isn't on a portal yet"))?;
+    if server != conn.server {
+        return Err(bad(CMD, format!("this sequence's portal is on {server}, but you're connected to {}", conn.server)));
+    }
     s.portal.gone.remove(&token);
     if bool_p(p, "wait").unwrap_or(false) {
         let data = filmcraft_portal::fetch_portal(&conn, &token).map_err(|e| EngineError::Other(e.to_string()))?;
-        s.portal.last_sync = Some(Instant::now());
-        s.portal.last_error = None;
+        s.portal.last_attempt.insert(token.clone(), Instant::now());
+        record_success(s, &token, &data);
         let r = apply_data(s, seq, &data);
         return Ok(json!({"added": r.added, "updated": r.updated, "notes": data.comments.len()}));
     }
@@ -596,13 +756,19 @@ fn finish_sync(s: &mut Session) {
     s.portal.sync = None;
     match result {
         Ok(data) => {
-            s.portal.last_error = None;
+            record_success(s, &token, &data);
             apply_data(s, seq, &data);
         }
         Err(e) => {
-            if e == filmcraft_portal::Error::NotFound.to_string() {
-                s.portal.gone.insert(token);
-            }
+            let issue = if e == filmcraft_portal::Error::NotFound.to_string() {
+                s.portal.gone.insert(token.clone());
+                Issue::Gone
+            } else if e == filmcraft_portal::Error::Unauthorized.to_string() {
+                Issue::Refused
+            } else {
+                Issue::Offline
+            };
+            s.portal.issues.insert(token, issue);
             // Say so once: a dropped connection shouldn't pop a message every 30 seconds.
             if s.portal.last_error.as_deref() != Some(e.as_str()) {
                 s.error_toast("portal", format!("Portal: {e}"));
@@ -629,18 +795,19 @@ pub fn poll(s: &mut Session) {
         return;
     }
     let Some(seq) = s.state.active_sequence else { return };
-    let Some(token) = s.project.portal_links.get(&seq).map(|l| l.token.clone()) else { return };
-    if s.portal.gone.contains(&token) || s.portal.last_sync.is_some_and(|t| t.elapsed() < POLL_EVERY) {
+    let Some((token, server)) = s.project.portal_links.get(&seq).map(|l| (l.token.clone(), l.server.clone())) else { return };
+    if s.portal.gone.contains(&token) || s.portal.last_attempt.get(&token).is_some_and(|t| t.elapsed() < POLL_EVERY) {
         return;
     }
-    if let Some(conn) = connection(s) {
+    // A project from another server: never ask this one about a portal it doesn't hold.
+    if let Some(conn) = connection(s).filter(|c| c.server == server) {
         start_sync(s, conn, seq, token);
     }
 }
 
 /// Make the next [`poll`] fetch comments now instead of at the end of the wait.
 pub fn make_sync_due(s: &mut Session) {
-    s.portal.last_sync = None;
+    s.portal.last_attempt.clear();
 }
 
 /// Whether the host should keep waking up so [`poll`] runs: a linked sequence is open, or

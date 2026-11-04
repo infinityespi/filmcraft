@@ -130,6 +130,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("window.workspace.saveAs", "Save as New Workspace…", ["Window", "Workspaces"], None),
     uic!("window.workspace.edit", "Edit Workspaces…", ["Window", "Workspaces"], None),
     uic!("portal.copyLink", "Copy Portal Link", ["File", "Portal"], None),
+    uic!("portal.copyCode", "Copy Review Code", ["File", "Portal"], None),
     uic!("portal.openLink", "Open Portal in Browser", ["File", "Portal"], None),
     uic!("tool.selection", "Selection Tool", [], Some("V")),
     uic!("tool.trackSelectForward", "Track Select Forward Tool", [], Some("A")),

@@ -610,6 +610,8 @@ pub struct UiState {
     /// File ▸ Portal: the Connect or Upload dialog. Never serialized: it can hold the API key, and
     /// UI state is readable over the control channel.
     #[serde(skip)]
+    pub portal_details: Option<crate::panels::portal::DetailsState>,
+    #[serde(skip)]
     pub portal_dialog: Option<crate::panels::portal::PortalDialog>,
     /// Edit / Clip / File menu dialog (Paste Attributes, Make Subclip, Frame Hold Options, …;
     /// open when Some). See `panels::clip_dialogs`.
@@ -1060,6 +1062,7 @@ impl Default for UiState {
             text_props_dialog: None,
             workspace_dialog: None,
             portal_dialog: None,
+            portal_details: None,
             clip_dialog: None,
             extras: Default::default(),
             gfx_templates: Default::default(),

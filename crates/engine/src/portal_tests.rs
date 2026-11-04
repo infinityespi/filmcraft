@@ -2,7 +2,7 @@ use super::*;
 use filmcraft_portal::Version;
 
 fn version(id: &str, number: i64) -> Version {
-    Version { id: id.into(), number, fps_num: 24, fps_den: 1 }
+    Version { id: id.into(), number, fps_num: 24, fps_den: 1, created_at: None }
 }
 
 fn comment(id: &str, frame: i64, author: &str, body: &str) -> Comment {
@@ -24,7 +24,7 @@ fn reply(id: &str, parent: &str, author: &str, body: &str) -> Comment {
 }
 
 fn data(comments: Vec<Comment>) -> PortalData {
-    PortalData { title: "T".into(), url: "https://x/portal/t".into(), versions: vec![version("v1", 1)], comments }
+    PortalData { title: "T".into(), url: "https://x/portal/t".into(), viewed_at: None, code: None, versions: vec![version("v1", 1)], comments }
 }
 
 /// A session on an empty 24 fps sequence linked to version 1 of a portal.
@@ -163,7 +163,7 @@ fn a_label_sticks_when_replies_arrive() {
 fn hostile_server_data_is_harmless() {
     let (mut s, seq) = linked();
     let mut bad_rate = data(vec![comment("a", i64::MAX, "M", "huge frame"), comment("b", -5, "M", "negative")]);
-    bad_rate.versions = vec![Version { id: "v1".into(), number: 1, fps_num: 0, fps_den: 0 }];
+    bad_rate.versions = vec![Version { id: "v1".into(), number: 1, fps_num: 0, fps_den: 0, created_at: None }];
     apply_data(&mut s, seq, &bad_rate);
     let mut orphan = comment("c", 1, "M", "unknown version");
     orphan.version_id = "missing".into();
@@ -243,4 +243,102 @@ fn the_saved_connection_is_private() {
 fn filenames_are_safe() {
     assert_eq!(upload_filename("Cut 1: final/final"), "Cut 1_ final_final.mp4");
     assert_eq!(upload_filename("   "), "Sequence.mp4");
+}
+
+fn connect(s: &mut Session, server: &str) {
+    s.portal.connection = Some(Connection { server: server.into(), api_key: "k".into() });
+    s.portal.connection_loaded = true;
+}
+
+#[test]
+fn people_who_never_connected_see_nothing() {
+    let mut s = Session::default();
+    s.portal.connection_loaded = true;
+    s.execute("file.newSequence", json!({"name": "Cut", "fps": 24})).unwrap();
+    assert_eq!(view(&mut s), None);
+}
+
+#[cfg(feature = "portal")]
+#[test]
+fn the_view_follows_the_link_and_the_connection() {
+    let mut s = Session::default();
+    s.execute("file.newSequence", json!({"name": "Plain", "fps": 24})).unwrap();
+    connect(&mut s, "https://x");
+    assert_eq!(view(&mut s).unwrap().status, PortalStatus::Share);
+
+    let (mut s, seq) = linked();
+    s.portal.connection = None;
+    s.portal.connection_loaded = true;
+    assert_eq!(view(&mut s).unwrap().status, PortalStatus::NeedsConnect, "a link, but no key on this computer");
+    connect(&mut s, "https://other");
+    assert_eq!(view(&mut s).unwrap().status, PortalStatus::NeedsConnect, "connected to a different server");
+    connect(&mut s, "https://x");
+    let v = view(&mut s).unwrap();
+    assert_eq!((v.status, v.version, v.synced_seconds_ago), (PortalStatus::Live, Some(1), None));
+    assert_eq!(v.portal_server.as_deref(), Some("https://x"));
+
+    for (issue, status) in [(Issue::Offline, PortalStatus::Offline), (Issue::Refused, PortalStatus::Reconnect), (Issue::Gone, PortalStatus::Unavailable)] {
+        s.portal.issues.insert("t".into(), issue);
+        assert_eq!(view(&mut s).unwrap().status, status);
+    }
+    record_success(&mut s, "t", &data(vec![]));
+    let v = view(&mut s).unwrap();
+    assert_eq!((v.status, v.title.as_deref(), v.synced_seconds_ago), (PortalStatus::Live, Some("T"), Some(0)));
+    let _ = seq;
+}
+
+#[cfg(feature = "portal")]
+#[test]
+fn notes_are_counted_and_new_ones_clear_when_seen() {
+    let (mut s, seq) = linked();
+    connect(&mut s, "https://x");
+    let mut done = comment("a", 12, "M", "One");
+    done.resolved = true;
+    apply_data(&mut s, seq, &data(vec![done, comment("b", 24, "M", "Two"), comment("c", 36, "M", "Three"), reply("d", "c", "S", "Replies aren't notes")]));
+    let v = view(&mut s).unwrap();
+    assert_eq!((v.open_notes, v.done_notes, v.new_notes), (2, 1, 3));
+    mark_seen(&mut s);
+    assert_eq!(view(&mut s).unwrap().new_notes, 0);
+}
+
+#[cfg(feature = "portal")]
+#[test]
+fn another_servers_portal_is_never_asked_for() {
+    let (mut s, _) = linked();
+    connect(&mut s, "https://other");
+    let e = s.execute("portal.sync", json!({"wait": true})).unwrap_err().to_string();
+    assert!(e.contains("https://x"), "{e}");
+    poll(&mut s);
+    assert!(s.portal.sync.is_none());
+}
+
+#[test]
+fn the_view_never_holds_the_key() {
+    let (mut s, _) = linked();
+    s.portal.connection = Some(Connection { server: "https://x".into(), api_key: "secret-key".into() });
+    s.portal.connection_loaded = true;
+    assert!(!format!("{:?}", view(&mut s)).contains("secret-key"));
+}
+
+#[cfg(not(feature = "portal"))]
+#[test]
+fn builds_without_the_feature_show_nothing_at_all() {
+    let (mut s, _) = linked();
+    connect(&mut s, "https://x");
+    assert_eq!(view(&mut s), None);
+    assert!(!needs_polling(&s));
+}
+
+#[cfg(feature = "portal")]
+#[test]
+fn the_review_code_comes_from_the_server_and_stays_out_of_the_project() {
+    let (mut s, _) = linked();
+    connect(&mut s, "https://x");
+    assert_eq!(active_code(&s), None);
+    let mut d = data(vec![]);
+    d.code = Some("7-crossover-clockwork".into());
+    record_success(&mut s, "t", &d);
+    assert_eq!(active_code(&s).as_deref(), Some("7-crossover-clockwork"));
+    assert_eq!(view(&mut s).unwrap().code.as_deref(), Some("7-crossover-clockwork"));
+    assert!(!serde_json::to_string(&*s.project).unwrap().contains("crossover"), "a shared project file must not carry the code");
 }
