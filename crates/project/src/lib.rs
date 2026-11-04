@@ -23,6 +23,8 @@ mod marker_url;
 pub use marker_url::marker_web_url;
 pub mod mask;
 pub mod mixer;
+mod portal;
+pub use portal::{PortalLink, PortalNote, PortalVersionLink};
 pub mod multicam;
 pub mod narration;
 pub mod transcript;
@@ -120,6 +122,9 @@ pub struct Project {
     /// instructions for whoever opens it next, frame numbers and the like. Schema v15.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Portals review links, keyed by sequence (File ▸ Portal).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub portal_links: BTreeMap<ItemId, PortalLink>,
 }
 
 impl Default for Project {
@@ -149,6 +154,7 @@ impl Project {
             source_graphics: BTreeMap::new(),
             narrations: BTreeMap::new(),
             notes: String::new(),
+            portal_links: BTreeMap::new(),
         }
     }
 

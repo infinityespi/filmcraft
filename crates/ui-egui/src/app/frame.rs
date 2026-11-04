@@ -133,6 +133,10 @@ impl FilmcraftApp {
                 self.play(1.0);
             }
         }
+        // An idle window draws no frames: stay awake so a linked sequence's comments arrive.
+        if filmcraft_engine::portal::needs_polling(&self.session) {
+            ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        }
         let job = running?;
         if job.label.starts_with("Rendering ") && !job.label.contains("audio") && self.watched_render.is_none_or(|w| w.0 != job.id) {
             let from = self.session.active_sequence().and_then(|q| q.mark_in).unwrap_or(Tick::ZERO);

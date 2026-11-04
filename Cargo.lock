@@ -2078,6 +2078,7 @@ dependencies = [
  "filmcraft-isobmff",
  "filmcraft-media",
  "filmcraft-mxf",
+ "filmcraft-portal",
  "filmcraft-project",
  "filmcraft-render",
  "filmcraft-scopes",
@@ -2357,6 +2358,18 @@ dependencies = [
  "objc2-core-video",
  "objc2-video-toolbox",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "filmcraft-portal"
+version = "0.17.0"
+dependencies = [
+ "rustls",
+ "rustls-rustcrypto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "ureq",
 ]
 
 [[package]]

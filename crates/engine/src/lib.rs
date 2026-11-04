@@ -40,6 +40,7 @@ mod palette;
 pub mod panels;
 pub mod paste_media;
 pub mod perf;
+pub mod portal;
 pub mod presets;
 pub mod previews;
 pub mod project_manager;
@@ -495,6 +496,8 @@ pub struct Session {
     pub mask_jobs: Vec<masks::PendingTrack>,
     /// Scene Edit Detection jobs whose results are applied when they finish.
     pub scene_jobs: Vec<scene_detect::PendingScene>,
+    /// Portals uploads and comment syncs in progress, and the server connection.
+    pub portal: portal::PortalState,
     /// Effect presets (built-in + the user's, persisted in the data directory).
     pub presets: presets::PresetLibrary,
     /// Export presets (built-in + the user's, persisted in the data directory) and favourites.
@@ -604,6 +607,7 @@ impl Session {
             media_jobs: Vec::new(),
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
+            portal: Default::default(),
             presets: Default::default(),
             export_presets: Default::default(),
             export_queue: Default::default(),
@@ -702,6 +706,7 @@ impl Session {
         proxies::poll(self);
         masks::poll(self);
         scene_detect::poll(self);
+        portal::poll(self);
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);
         let Some(p) = self.persistence.as_mut() else { return };
@@ -1175,6 +1180,11 @@ impl Session {
         {
             self.state.gap_selection = None;
         }
+    }
+
+    /// A project change made outside the undo history (Portals notes).
+    pub(crate) fn bump_project(&mut self) {
+        self.bump();
     }
 
     fn bump(&mut self) {
